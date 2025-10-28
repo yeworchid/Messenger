@@ -1,79 +1,3 @@
-using System.Collections.Concurrent;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// Добавляем CORS для работы с фронтендом
-builder.Services.AddCors(options =>
-{
-    options.AddDefaultPolicy(policy =>
-    {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
-    });
-});
-
-var app = builder.Build();
-
-app.UseCors();
-
-// Хранилище сообщений в памяти
-var messages = new ConcurrentQueue<Message>();
-var waitingClients = new ConcurrentBag<TaskCompletionSource<List<Message>>>();
-
-// Отправка сообщения
-app.MapPost("/api/messages", (MessageRequest request) =>
-{
-    var message = new Message(request.Author, request.Text, DateTime.Now);
-    messages.Enqueue(message);
-    
-    // Уведомляем всех ожидающих клиентов
-    var clients = waitingClients.ToArray();
-    waitingClients.Clear();
-    
-    var messagesList = messages.ToList();
-    foreach (var client in clients)
-    {
-        client.SetResult(messagesList);
-    }
-    
-    return Results.Ok(message);
-});
-
-// Long polling для получения сообщений
-app.MapGet("/api/messages", async (int? lastCount = 0) =>
-{
-    var currentMessages = messages.ToList();
-    
-    // Если есть новые сообщения, возвращаем их сразу
-    if (currentMessages.Count > lastCount)
-    {
-        return Results.Ok(currentMessages);
-    }
-    
-    // Иначе ждем новых сообщений
-    var tcs = new TaskCompletionSource<List<Message>>();
-    waitingClients.Add(tcs);
-    
-    // Таймаут 30 секунд
-    var timeoutTask = Task.Delay(30000);
-    var completedTask = await Task.WhenAny(tcs.Task, timeoutTask);
-    
-    if (completedTask == timeoutTask)
-    {
-        return Results.Ok(currentMessages);
-    }
-    
-    return Results.Ok(await tcs.Task);
-});
-
-// Статический HTML файл
-app.MapGet("/", () => Results.Content(GetHtmlContent(), "text/html"));
-
-app.Run();
-
-// HTML контент
-static string GetHtmlContent() => """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -158,6 +82,7 @@ static string GetHtmlContent() => """
     </div>
 
     <script>
+        const API_BASE = 'http://localhost:5000';
         let messageCount = 0;
         let isPolling = false;
 
@@ -178,7 +103,7 @@ static string GetHtmlContent() => """
             }
 
             try {
-                const response = await fetch('/api/messages', {
+                const response = await fetch(`${API_BASE}/api/messages`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -203,7 +128,7 @@ static string GetHtmlContent() => """
             try {
                 statusDiv.textContent = 'Ожидание сообщений...';
                 
-                const response = await fetch(`/api/messages?lastCount=${messageCount}`);
+                const response = await fetch(`${API_BASE}/api/messages?lastCount=${messageCount}`);
                 const messages = await response.json();
                 
                 if (messages.length > messageCount) {
@@ -261,10 +186,3 @@ static string GetHtmlContent() => """
     </script>
 </body>
 </html>
-""";
-
-// Модель сообщения
-public record Message(string Author, string Text, DateTime Timestamp);
-
-// Модель запроса
-public record MessageRequest(string Author, string Text);
